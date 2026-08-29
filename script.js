@@ -1,7 +1,7 @@
 const chapterMap = [
   { id: 'world', title: '세계관 역사' },
   { id: 'characters', title: '캐릭터 정보' },
-  { id: 'events', title: '주요 이벤트' }
+  { id: 'events', title: '이벤트' }
 ];
 
 const portraitMap = {
@@ -146,64 +146,74 @@ function parseCharacterDetails(lines, characters) {
   return details;
 }
 
-function parseEvents(lines) {
+function parseAutomaticEvents(lines) {
   const events = [];
   let current = null;
-  let resultMode = false;
+  let inSection = false;
 
   for (const raw of lines) {
     const line = raw.trim();
-    if (/^###\s*.*배경/.test(line)) break;
+    if (/^##\s*커맨드 비입력 이벤트/.test(line)) {
+      inSection = true;
+      continue;
+    }
     if (/^##\s*커맨드 입력 이벤트/.test(line)) break;
+    if (!inSection) continue;
+
     const eventHeading = line.match(/^\[([^\]]+)\]$/);
     if (eventHeading) {
-      current = { name: eventHeading[1], time: '무관', condition: '무관', content: '무관', results: [] };
+      current = { name: eventHeading[1].trim(), lines: [] };
       events.push(current);
-      resultMode = false;
       continue;
     }
     if (!current || !line || line.startsWith('#')) continue;
-    const cleaned = cleanLine(line);
-    if (/^결과\s*$/.test(cleaned)) {
-      resultMode = true;
-      continue;
-    }
-    const field = splitField(cleaned);
-    if (field) {
-      if (field.label === '시기') current.time = field.value || '무관';
-      else if (field.label === '발생조건') current.condition = field.value || '무관';
-      else if (field.label === '내용') current.content = field.value || '무관';
-      else if (['결과', '성공시', '실패시'].includes(field.label)) {
-        current.results.push(`${field.label}: ${field.value}`);
-        resultMode = true;
-      } else if (resultMode) {
-        current.results.push(cleaned);
-      }
-    } else if (resultMode) {
-      current.results.push(cleaned);
-    }
-  }
-  for (const event of events) {
-    if (!event.results.length) event.results.push('무관');
+    current.lines.push(cleanLine(line));
   }
   return events;
 }
 
-function parseCommands(lines) {
-  const groups = [];
+function parseCommandEvents(lines) {
+  const events = [];
   let current = null;
+  let group = '주요 이벤트';
+  let inSection = false;
+
   for (const raw of lines) {
     const line = raw.trim();
     if (/^###\s*.*배경/.test(line)) break;
-    const heading = line.match(/^###\s*(.+목록)\s*$/);
-    if (heading) {
-      current = { heading: heading[1], commands: [] };
-      groups.push(current);
+    if (/^##\s*커맨드 입력 이벤트/.test(line)) {
+      inSection = true;
       continue;
     }
-    if (current && /^-\s*!/.test(line)) current.commands.push(cleanLine(line));
+    if (!inSection || !line) continue;
+
+    const groupHeading = line.match(/^###\s*(.+?)\s*목록\s*$/);
+    if (groupHeading) {
+      group = groupHeading[1].trim();
+      current = null;
+      continue;
+    }
+
+    const cleaned = cleanLine(line);
+    const commandMatch = cleaned.match(/^(![^:：\s]+)(?:[:：]\s*(.*))?$/);
+    if (commandMatch) {
+      current = {
+        name: commandMatch[1].slice(1),
+        command: commandMatch[1],
+        group,
+        lines: commandMatch[2] ? [`설명: ${commandMatch[2]}`] : []
+      };
+      events.push(current);
+      continue;
+    }
+
+    if (!current) continue;
+    const eventHeading = line.match(/^###\s*(.+)$/);
+    if (eventHeading) continue;
+    if (cleaned.replace(/\s/g, '') === current.name.replace(/\s/g, '')) continue;
+    current.lines.push(cleaned);
   }
-  return groups;
+  return events;
 }
 
 function fieldsHTML(fields) {
@@ -243,16 +253,33 @@ function characterHTML(character, extra) {
   </article>`;
 }
 
+function eventLinesHTML(lines) {
+  return lines.map(line => {
+    const field = splitField(line);
+    if (field) {
+      return `<div class="event-field"><strong>${escapeHTML(field.label)}</strong><p>${escapeHTML(field.value)}</p></div>`;
+    }
+    const isHeading = /^(실행조건|결과)$/.test(line);
+    return `<p class="event-note${isHeading ? ' event-note-heading' : ''}">${escapeHTML(line)}</p>`;
+  }).join('');
+}
+
 function eventHTML(event) {
-  return `<article class="event-card">
-    <h3>${escapeHTML(event.name)}</h3>
-    <dl class="event-fields">
-      <div><dt>시기</dt><dd>${escapeHTML(event.time)}</dd></div>
-      <div><dt>발생조건</dt><dd>${escapeHTML(event.condition)}</dd></div>
-      <div><dt>내용</dt><dd>${escapeHTML(event.content)}</dd></div>
-      <div><dt>결과</dt><dd>${event.results.map(result => `<p>${escapeHTML(result)}</p>`).join('')}</dd></div>
-    </dl>
-  </article>`;
+  return `<details class="fold-card event-card">
+    <summary>
+      <span>${escapeHTML(event.name)}</span>
+      ${event.command ? `<code>${escapeHTML(event.command)}</code>` : ''}
+    </summary>
+    <div class="fold-body event-fields">${eventLinesHTML(event.lines)}</div>
+  </details>`;
+}
+
+function commandEventsHTML(events) {
+  const groups = [...new Set(events.map(event => event.group))];
+  return groups.map(group => `<section class="event-command-group">
+    <h4>${escapeHTML(group)}</h4>
+    <div class="event-list">${events.filter(event => event.group === group).map(eventHTML).join('')}</div>
+  </section>`).join('');
 }
 
 fetch('settings.txt')
@@ -267,8 +294,8 @@ fetch('settings.txt')
     const world = parseWorld(lines.slice(0, characterStart));
     const characters = parseCharacters(lines.slice(characterStart, eventStart));
     const details = parseCharacterDetails(lines.slice(eventStart), characters);
-    const events = parseEvents(lines.slice(eventStart));
-    const commands = parseCommands(lines.slice(eventStart));
+    const automaticEvents = parseAutomaticEvents(lines.slice(eventStart));
+    const commandEvents = parseCommandEvents(lines.slice(eventStart));
 
     document.querySelector('#content').innerHTML = `
       <section class="chapter" id="world">
@@ -282,8 +309,16 @@ fetch('settings.txt')
       </section>
       <section class="chapter" id="events">
         <h2 class="chapter-title">${chapterMap[2].title}</h2>
-        <div class="event-list">${events.map(eventHTML).join('')}</div>
-        ${commands.map(group => `<section class="command-group"><h3>${escapeHTML(group.heading)}</h3><div>${group.commands.map(command => `<code>${escapeHTML(command)}</code>`).join('')}</div></section>`).join('')}
+        <section class="event-category">
+          <h3 class="event-type-title">커맨드 비입력 이벤트</h3>
+          <p class="chapter-guide">시기에 도달하면 자동으로 발생합니다. 이벤트를 누르면 설명이 펼쳐집니다.</p>
+          <div class="event-list">${automaticEvents.map(eventHTML).join('')}</div>
+        </section>
+        <section class="event-category">
+          <h3 class="event-type-title">커맨드 입력 이벤트</h3>
+          <p class="chapter-guide">해당 커맨드를 입력했을 때만 발동합니다. 이벤트를 누르면 설명이 펼쳐집니다.</p>
+          ${commandEventsHTML(commandEvents)}
+        </section>
       </section>`;
   })
   .catch(error => {
